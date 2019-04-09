@@ -92,12 +92,13 @@ class EmbeddingLayer(object):
         self.name = name
 
         # Create embedding matrix and its transposes
-        self.embedding_table = tf.get_variable(name='embedding_table',
-                                               shape=[vocabulary_size, embedding_size],
-                                               dtype=float_dtype,
-                                               initializer=glorot_uniform_initializer(),
-                                               trainable=True)
-        self.projection_matrix = tf.transpose(self.embedding_table, name='vocab_projection_matrix')
+        with tf.variable_scope(self.name):
+            self.embedding_table = tf.get_variable(name='embedding_table',
+                                                shape=[vocabulary_size, embedding_size],
+                                                dtype=float_dtype,
+                                                initializer=glorot_uniform_initializer(),
+                                                trainable=True)
+            self.projection_matrix = tf.transpose(self.embedding_table, name='vocab_projection_matrix')
 
     def embed(self, one_hot_inputs):
         """ Embeds one-hot-vectors corresponding to input tokens. """
@@ -148,7 +149,7 @@ class LayerNormLayer(object):
     def forward(self, inputs):
         layer_mean, layer_var = tf.nn.moments(inputs, axes=-1, keep_dims=True)
         normalized = tf.add(
-            tf.multiply(self.scale, tf.div(tf.subtract(inputs, layer_mean),
+            tf.multiply(self.scale, tf.math.divide(tf.subtract(inputs, layer_mean),
                                            tf.sqrt(tf.add(layer_var, self.eps)))),
             self.offset)
 
@@ -407,6 +408,6 @@ class MaskedCrossEntropy(object):
             normalized_loss = tf.reshape(flat_normalized_loss, tf.shape(targets))
             masked_loss = normalized_loss * target_mask
             sentence_lengths = tf.reduce_sum(target_mask, axis=self.time_dim, keepdims=False)
-            sentence_loss = tf.div(tf.reduce_sum(masked_loss, axis=self.time_dim, keepdims=False), sentence_lengths)
+            sentence_loss = tf.math.divide(tf.reduce_sum(masked_loss, axis=self.time_dim, keepdims=False), sentence_lengths)
             batch_loss = tf.reduce_mean(sentence_loss, keepdims=False)
         return masked_loss, sentence_loss, batch_loss
