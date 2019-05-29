@@ -100,6 +100,7 @@ class ConfigSpecification:
             ('validation',            'validation parameters'),
             ('display',               'display parameters'),
             ('translate',             'translate parameters'),
+            ('sampling',              'sampling parameters'),
         ]
         self._group_descriptions = collections.OrderedDict(description_pairs)
 
@@ -451,6 +452,14 @@ class ConfigSpecification:
             hidden_arg_names=['--use_layer_norm', '--layer_normalisation'],
             action='store_true',
             help='Set to use layer normalization in encoder and decoder'))
+
+        group.append(ParameterSpecification(
+            name='rnn_lexical_model', default=False,
+            legacy_names=['lexical_model'],
+            visible_arg_names=['--rnn_lexical_model'],
+            hidden_arg_names=['--lexical_model'],
+            action='store_true',
+            help='Enable feedforward lexical model (Nguyen and Chiang, 2018)'))
 
         # Add command-line parameters for 'network_transformer' group.
 
@@ -810,6 +819,22 @@ class ConfigSpecification:
             help='Maximum length of translation output sentence (default: '
                  '%(default)s)'))
 
+        group.append(ParameterSpecification(
+            name='translation_strategy', default='beam_search',
+            visible_arg_names=['--translation_strategy'],
+            type=str, choices=['beam_search', 'sampling'],
+            help='translation_strategy, either beam_search or sampling (default: %(default)s)'))
+
+        # Add command-line parameters for 'sampling' group.
+
+        group = param_specs['sampling']
+
+        group.append(ParameterSpecification(
+            name='sampling_temperature', type=float, default=1.0,
+            metavar="FLOAT",
+            visible_arg_names=['--sampling_temperature'],
+            help='softmax temperature used for sampling (default %(default)s)'))
+
         return param_specs
 
     def _build_name_to_spec(self):
@@ -1146,6 +1171,11 @@ def _check_config_consistency(spec, config, set_by_user):
             arg_names_string(max_sents_param),
             arg_names_string(max_tokens_param))
         error_messages.append(msg)
+
+    # softmax_mixture_size and lexical_model are currently mutually exclusive:
+    if config.softmax_mixture_size > 1 and config.rnn_lexical_model:
+       error_messages.append('behavior of --rnn_lexical_model is undefined if softmax_mixture_size > 1')
+
 
     return error_messages
 
