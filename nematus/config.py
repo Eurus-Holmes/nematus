@@ -392,40 +392,33 @@ class ConfigSpecification:
             help='pass context vector (from first layer) to deep decoder '
                  'layers'))
 
+        # option should no longer be set in command line;
+        # code only remains to ensure backward-compatible loading of JSON files
         group.append(ParameterSpecification(
             name='rnn_use_dropout', default=False,
             legacy_names=['use_dropout'],
             visible_arg_names=['--rnn_use_dropout'],
             hidden_arg_names=['--use_dropout'],
             action='store_true',
-            help='use dropout layer (default: %(default)s)'))
+            help='REMOVED: has no effect'))
 
         group.append(ParameterSpecification(
-            name='rnn_dropout_embedding', default=None,
+            name='rnn_dropout_embedding', default=0.0,
             legacy_names=['dropout_embedding'],
             visible_arg_names=['--rnn_dropout_embedding'],
             hidden_arg_names=['--dropout_embedding'],
-            derivation_func=_derive_rnn_dropout_embedding,
             type=float, metavar='FLOAT',
-            # FIXME rnn_dropout_embedding effectively has two defaults,
-            #       depending on whether we're reading from the command-
-            #       line or from a JSON config - does this make sense?
-            #       We hardcode the former here.
             help='dropout for input embeddings (0: no dropout) (default: '
-                 '0.2)'))
+                 '%(default)s)'))
 
         group.append(ParameterSpecification(
-            name='rnn_dropout_hidden', default=None,
+            name='rnn_dropout_hidden', default=0.0,
             legacy_names=['dropout_hidden'],
             visible_arg_names=['--rnn_dropout_hidden'],
             hidden_arg_names=['--dropout_hidden'],
-            derivation_func=_derive_rnn_dropout_hidden,
             type=float, metavar='FLOAT',
-            # FIXME rnn_dropout_hidden effectively has two defaults,
-            #       depending on whether we're reading from the command-
-            #       line or from a JSON config - does this make sense?
-            #       We hardcode the former here.
-            help='dropout for hidden layer (0: no dropout) (default: 0.2)'))
+            help='dropout for hidden layer (0: no dropout) (default: '
+                 '%(default)s)'))
 
         group.append(ParameterSpecification(
             name='rnn_dropout_source', default=0.0,
@@ -567,6 +560,13 @@ class ConfigSpecification:
             help='label smoothing (default: %(default)s)'))
 
         group.append(ParameterSpecification(
+            name='exponential_smoothing', default=0.0,
+            visible_arg_names=['--exponential_smoothing'],
+            type=float, metavar='FLOAT',
+            help='exponential smoothing factor; use 0 to disable (default: '
+                 '%(default)s)'))
+
+        group.append(ParameterSpecification(
             name='optimizer', default='adam',
             visible_arg_names=['--optimizer'],
             type=str, choices=['adam'],
@@ -595,7 +595,8 @@ class ConfigSpecification:
         group.append(ParameterSpecification(
             name='learning_schedule', default='constant',
             visible_arg_names=['--learning_schedule'],
-            type=str, choices=['constant', 'transformer'],
+            type=str, choices=['constant', 'transformer',
+                               'warmup-plateau-decay'],
             help='learning schedule (default: %(default)s)'))
 
         group.append(ParameterSpecification(
@@ -613,6 +614,14 @@ class ConfigSpecification:
             help='number of initial updates during which the learning rate is '
                  'increased linearly during learning rate scheduling '
                  '(default: %(default)s)'))
+
+        group.append(ParameterSpecification(
+            name='plateau_steps', default=0,
+            visible_arg_names=['--plateau_steps'],
+            type=int, metavar='INT',
+            help='number of updates after warm-up before the learning rate '
+                 'starts to decay (applies to \'warmup-plateau-decay\' '
+                 'learning schedule only). (default: %(default)s)'))
 
         group.append(ParameterSpecification(
             name='maxlen', default=100,
@@ -953,6 +962,9 @@ def read_config_from_cmdline():
     meta_config.from_cmdline = True
     meta_config.from_theano = False
 
+    # Set defaults for removed options
+    config.rnn_use_dropout = True
+
     # Run derivation functions.
     for group in spec.group_names:
         for param in spec.params_by_group(group):
@@ -973,7 +985,7 @@ def write_config_to_json_file(config, path):
     """
 
     config_as_dict = collections.OrderedDict(sorted(vars(config).items()))
-    json.dump(config_as_dict, open('%s.json' % path, 'w'), indent=2)
+    json.dump(config_as_dict, open('%s.json' % path, 'w', encoding="UTF-8"), indent=2)
 
 
 def load_config_from_json_file(basename):
@@ -1072,20 +1084,23 @@ def _check_config_consistency(spec, config, set_by_user):
 
     # Check user-supplied learning schedule options are consistent.
     if config.learning_schedule == 'constant':
-        param = spec.lookup('warmup_steps')
-        assert param is not None
-        if param.name in set_by_user:
-            msg = '{} cannot be used with \'constant\' learning ' \
-                   'schedule'.format(arg_names_string(param),
-                                     config.model_type)
-            error_messages.append(msg)
+        for key in ['warmup_steps', 'plateau_steps']:
+            param = spec.lookup(key)
+            assert param is not None
+            if param.name in set_by_user:
+                msg = '{} cannot be used with \'constant\' learning ' \
+                       'schedule'.format(arg_names_string(param),
+                                         config.model_type)
+                error_messages.append(msg)
     elif config.learning_schedule == 'transformer':
-        param = spec.lookup('learning_rate')
-        assert param is not None
-        if param.name in set_by_user:
-            msg = '{} cannot be used with \'transformer\' learning ' \
-                  'schedule'.format(arg_names_string(param), config.model_type)
-            error_messages.append(msg)
+        for key in ['learning_rate', 'plateau_steps']:
+            param = spec.lookup(key)
+            assert param is not None
+            if param.name in set_by_user:
+                msg = '{} cannot be used with \'transformer\' learning ' \
+                      'schedule'.format(arg_names_string(param),
+                                        config.model_type)
+                error_messages.append(msg)
 
     # TODO Other similar checks? e.g. check user hasn't set adam parameters
     #       if optimizer != 'adam' (not currently possible but probably will
@@ -1176,6 +1191,14 @@ def _check_config_consistency(spec, config, set_by_user):
     if config.softmax_mixture_size > 1 and config.rnn_lexical_model:
        error_messages.append('behavior of --rnn_lexical_model is undefined if softmax_mixture_size > 1')
 
+    if 'rnn_use_dropout' in set_by_user:
+        msg = '--rnn_use_dropout is no longer used. Set --rnn_dropout_* instead (0 by default).\n' \
+              'old defaults:\n' \
+              '--rnn_dropout_embedding: 0.2\n' \
+              '--rnn_dropout_hidden: 0.2\n' \
+              '--rnn_dropout_source: 0\n' \
+              '--rnn_dropout_target: 0'
+        error_messages.append(msg)
 
     return error_messages
 
@@ -1277,18 +1300,6 @@ def _derive_dim_per_factor(config, meta_config):
         return config.dim_per_factor
     assert config.factors == 1
     return [config.embedding_size]
-
-
-def _derive_rnn_dropout_embedding(config, meta_config):
-    if config.rnn_dropout_embedding is not None:
-        return config.rnn_dropout_embedding
-    return 0.2 if meta_config.from_cmdline else 0.0
-
-
-def _derive_rnn_dropout_hidden(config, meta_config):
-    if config.rnn_dropout_hidden is not None:
-        return config.rnn_dropout_hidden
-    return 0.2 if meta_config.from_cmdline else 0.0
 
 
 def _derive_valid_source_dataset(config, meta_config):

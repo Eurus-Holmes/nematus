@@ -22,8 +22,9 @@ import tensorflow as tf
 
 from config import read_config_from_cmdline, write_config_to_json_file
 from data_iterator import TextIterator
+from exponential_smoothing import ExponentialSmoothing
 import inference
-from learning_schedule import ConstantSchedule, TransformerSchedule
+import learning_schedule
 import model_loader
 from model_updater import ModelUpdater
 import rnn_model
@@ -100,11 +101,18 @@ def train(config, sess):
     global_step = tf.get_variable('time', [], initializer=init, trainable=False)
 
     if config.learning_schedule == "constant":
-        schedule = ConstantSchedule(config.learning_rate)
+        schedule = learning_schedule.ConstantSchedule(config.learning_rate)
     elif config.learning_schedule == "transformer":
-        schedule = TransformerSchedule(global_step=global_step,
-                                       dim=config.state_size,
-                                       warmup_steps=config.warmup_steps)
+        schedule = learning_schedule.TransformerSchedule(
+            global_step=global_step,
+            dim=config.state_size,
+            warmup_steps=config.warmup_steps)
+    elif config.learning_schedule == "warmup-plateau-decay":
+        schedule = learning_schedule.WarmupPlateauDecaySchedule(
+            global_step=global_step,
+            peak_learning_rate=config.learning_rate,
+            warmup_steps=config.warmup_steps,
+            plateau_steps=config.plateau_steps)
     else:
         logging.error('Learning schedule type is not valid: {}'.format(
             config.learning_schedule))
@@ -128,6 +136,9 @@ def train(config, sess):
 
     updater = ModelUpdater(config, num_gpus, replicas, optimizer, global_step,
                            writer)
+
+    if config.exponential_smoothing > 0.0:
+        smoothing = ExponentialSmoothing(config.exponential_smoothing)
 
     saver, progress = model_loader.init_or_restore_variables(
         config, sess, train=True)
@@ -169,6 +180,12 @@ def train(config, sess):
             n_words += int(numpy.sum(y_mask_in))
             progress.uidx += 1
 
+            # Update the smoothed version of the model variables.
+            # To reduce the performance overhead, we only do this once every
+            # N steps (the smoothing factor is adjusted accordingly).
+            if config.exponential_smoothing > 0.0 and progress.uidx % smoothing.update_frequency == 0:
+                sess.run(fetches=smoothing.update_ops)
+
             if config.disp_freq and progress.uidx % config.disp_freq == 0:
                 duration = time.time() - last_time
                 disp_time = datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')
@@ -209,8 +226,14 @@ def train(config, sess):
                         logging.info(msg)
 
             if config.valid_freq and progress.uidx % config.valid_freq == 0:
-                valid_ce = validate(sess, replicas[0], config,
-                                    valid_text_iterator)
+                if config.exponential_smoothing > 0.0:
+                    sess.run(fetches=smoothing.swap_ops)
+                    valid_ce = validate(sess, replicas[0], config,
+                                        valid_text_iterator)
+                    sess.run(fetches=smoothing.swap_ops)
+                else:
+                    valid_ce = validate(sess, replicas[0], config,
+                                        valid_text_iterator)
                 if (len(progress.history_errs) == 0 or
                     valid_ce < min(progress.history_errs)):
                     progress.history_errs.append(valid_ce)
@@ -226,7 +249,12 @@ def train(config, sess):
                         progress.estop = True
                         break
                 if config.valid_script is not None:
-                    score = validate_with_script(sess, replicas[0], config)
+                    if config.exponential_smoothing > 0.0:
+                        sess.run(fetches=smoothing.swap_ops)
+                        score = validate_with_script(sess, replicas[0], config)
+                        sess.run(fetches=smoothing.swap_ops)
+                    else:
+                        score = validate_with_script(sess, replicas[0], config)
                     need_to_save = (score is not None and
                         (len(progress.valid_script_scores) == 0 or
                          score > max(progress.valid_script_scores)))
@@ -316,7 +344,7 @@ def validate_with_script(session, model, config):
         return None
     logging.info('Starting external validation.')
     out = tempfile.NamedTemporaryFile(mode='w')
-    inference.translate_file(input_file=open(config.valid_source_dataset),
+    inference.translate_file(input_file=open(config.valid_source_dataset, encoding="UTF-8"),
                              output_file=out,
                              session=session,
                              models=[model],
@@ -413,6 +441,9 @@ if __name__ == "__main__":
     # Parse command-line arguments.
     config = read_config_from_cmdline()
     logging.info(config)
+
+    # TensorFlow 2.0 feature needed by ExponentialSmoothing.
+    tf.enable_resource_variables()
 
     # Create the TensorFlow session.
     tf_config = tf.ConfigProto()

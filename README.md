@@ -150,9 +150,8 @@ An updated version of these scripts that uses the Transformer model can be found
 | --rnn_dec_base_transition_depth INT | number of GRU transition operations applied in the first layer of the decoder. Minimum is 2. (Only applies to gru_cond). (default: 2) |
 | --rnn_dec_high_transition_depth INT | number of GRU transition operations applied in the higher layers of the decoder. Minimum is 1. (Only applies to gru). (default: 1) |
 | --rnn_dec_deep_context | pass context vector (from first layer) to deep decoder layers |
-| --rnn_use_dropout | use dropout layer (default: False) |
-| --rnn_dropout_embedding FLOAT | dropout for input embeddings (0: no dropout) (default: 0.2) |
-| --rnn_dropout_hidden FLOAT | dropout for hidden layer (0: no dropout) (default: 0.2) |
+| --rnn_dropout_embedding FLOAT | dropout for input embeddings (0: no dropout) (default: 0.0) |
+| --rnn_dropout_hidden FLOAT | dropout for hidden layer (0: no dropout) (default: 0.0) |
 | --rnn_dropout_source FLOAT | dropout source words (0: no dropout) (default: 0.0) |
 | --rnn_dropout_target FLOAT | dropout target words (0: no dropout) (default: 0.0) |
 | --rnn_layer_normalisation | Set to use layer normalization in encoder and decoder |
@@ -179,13 +178,15 @@ An updated version of these scripts that uses the Transformer model can be found
 | --prior_model PATH | Prior model for MAP-L2 regularization. Unless using " --reload", this will also be used for initialization. |
 | --clip_c FLOAT | gradient clipping threshold (default: 1.0) |
 | --label_smoothing FLOAT | label smoothing (default: 0.0) |
+| --exponential_smoothing FLOAT | exponential smoothing factor; use 0 to disable (default: 0.0) |
 | --optimizer {adam} | optimizer (default: adam) |
 | --adam_beta1 FLOAT | exponential decay rate for the first moment estimates (default: 0.9) |
 | --adam_beta2 FLOAT | exponential decay rate for the second moment estimates (default: 0.999) |
 | --adam_epsilon FLOAT | constant for numerical stability (default: 1e-08) |
-| --learning_schedule {constant,transformer} | learning schedule (default: constant) |
+| --learning_schedule {constant,transformer,warmup-plateau-decay} | learning schedule (default: constant) |
 | --learning_rate FLOAT | learning rate (default: 0.0001) |
 | --warmup_steps INT | number of initial updates during which the learning rate is increased linearly during learning rate scheduling (default: 8000) |
+| --plateau_steps INT | number of updates after warm-up before the learning rate starts to decay (applies to 'warmup-plateau-decay' learning schedule only). (default: 0) |
 | --maxlen INT | maximum sequence length for training and validation (default: 100) |
 | --batch_size INT | minibatch size (default: 80) |
 | --token_batch_size INT | minibatch size (expressed in number of source or target tokens). Sentence-level minibatch size will be dynamic. If this is enabled, batch_size only affects sorting by length. (default: 0) |
@@ -221,9 +222,10 @@ An updated version of these scripts that uses the Transformer model can be found
 #### translate parameters
 | parameter | description |
 |---        |---          |
-| --no_normalize | Cost of sentences will not be normalized by length |
+| --normalization_alpha [ALPHA] | normalize scores by sentence length (with argument, " "exponentiate lengths by ALPHA) |
 | --n_best | Print full beam |
 | --translation_maxlen INT | Maximum length of translation output sentence (default: 200) |
+| --translation_strategy {beam_search,sampling} | translation_strategy, either beam_search or sampling (default: beam_search) |
 
 #### `nematus/translate.py` : use an existing model to translate a source text
 
