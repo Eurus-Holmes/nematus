@@ -20,16 +20,35 @@ logging.basicConfig(level=level, format='%(levelname)s: %(message)s')
 import numpy
 import tensorflow as tf
 
-from config import read_config_from_cmdline, write_config_to_json_file
-from data_iterator import TextIterator
-from exponential_smoothing import ExponentialSmoothing
-import inference
-import learning_schedule
-import model_loader
-from model_updater import ModelUpdater
-import rnn_model
-from transformer import Transformer as TransformerModel
-import util
+try:
+    from .beam_search_sampler import BeamSearchSampler
+    from .config import read_config_from_cmdline, write_config_to_json_file
+    from .data_iterator import TextIterator
+    from .exponential_smoothing import ExponentialSmoothing
+    from . import learning_schedule
+    from . import model_loader
+    from .model_updater import ModelUpdater
+    from .random_sampler import RandomSampler
+    from . import rnn_model
+    from . import tf_utils
+    from .transformer import Transformer as TransformerModel
+    from . import translate_utils
+    from . import util
+except (ModuleNotFoundError, ImportError) as e:
+    from beam_search_sampler import BeamSearchSampler
+    from config import read_config_from_cmdline, write_config_to_json_file
+    from data_iterator import TextIterator
+    from exponential_smoothing import ExponentialSmoothing
+    import learning_schedule
+    import model_loader
+    from model_updater import ModelUpdater
+    from random_sampler import RandomSampler
+    import rnn_model
+    import tf_utils
+    from transformer import Transformer as TransformerModel
+    import translate_utils
+    import util
+
 
 
 def load_data(config):
@@ -50,7 +69,8 @@ def load_data(config):
                         use_factor=(config.factors > 1),
                         maxibatch_size=config.maxibatch_size,
                         token_batch_size=config.token_batch_size,
-                        keep_data_in_memory=config.keep_train_set_in_memory)
+                        keep_data_in_memory=config.keep_train_set_in_memory,
+                        preprocess_script=config.preprocess_script)
 
     if config.valid_freq and config.valid_source_dataset and config.valid_target_dataset:
         valid_text_iterator = TextIterator(
@@ -81,8 +101,21 @@ def train(config, sess):
 
     # Construct the graph, with one model replica per GPU
 
-    num_gpus = len(util.get_available_gpus())
+    num_gpus = len(tf_utils.get_available_gpus())
     num_replicas = max(1, num_gpus)
+
+    if config.loss_function == 'MRT':
+        assert config.gradient_aggregation_steps == 1
+        assert config.max_sentences_per_device == 0, "MRT mode does not support sentence-based split"
+        if config.max_tokens_per_device != 0:
+            assert (config.samplesN * config.maxlen <= config.max_tokens_per_device), "need to make sure candidates of a sentence could be " \
+                                                                                      "feed into the model"
+        else:
+            assert num_replicas == 1, "MRT mode does not support sentence-based split"
+            assert (config.samplesN * config.maxlen <= config.token_batch_size), "need to make sure candidates of a sentence could be " \
+                                                                                      "feed into the model"
+
+
 
     logging.info('Building model...')
     replicas = []
@@ -140,18 +173,22 @@ def train(config, sess):
     if config.exponential_smoothing > 0.0:
         smoothing = ExponentialSmoothing(config.exponential_smoothing)
 
-    # record the initial translation_maxlen
-    init_translation_maxlen = config.translation_maxlen
-
     saver, progress = model_loader.init_or_restore_variables(
         config, sess, train=True)
 
     global_step.load(progress.uidx, sess)
 
-    # Use an InferenceModelSet to abstract over model types for sampling and
-    # beam search. Multi-GPU sampling and beam search are not currently
-    # supported, so we just use the first replica.
-    model_set = inference.InferenceModelSet([replicas[0]], [config])
+    if config.sample_freq:
+        random_sampler = RandomSampler(
+            models=[replicas[0]],
+            configs=[config],
+            beam_size=1)
+
+    if config.beam_freq or config.valid_script is not None:
+        beam_search_sampler = BeamSearchSampler(
+            models=[replicas[0]],
+            configs=[config],
+            beam_size=config.beam_size)
 
     #save model options
     write_config_to_json_file(config, config.saveto)
@@ -179,8 +216,10 @@ def train(config, sess):
             write_summary_for_this_batch = config.summary_freq and ((progress.uidx % config.summary_freq == 0) or (config.finish_after and progress.uidx % config.finish_after == 0))
             (factors, seqLen, batch_size) = x_in.shape
 
-            output = updater.update(sess, x_in, x_mask_in, y_in, y_mask_in, num_to_target, init_translation_maxlen,
-                                  write_summary_for_this_batch)
+            output = updater.update(
+                sess, x_in, x_mask_in, y_in, y_mask_in, num_to_target,
+                write_summary_for_this_batch)
+
             if config.print_per_token_pro == False:
                 total_loss += output
             else:
@@ -194,9 +233,6 @@ def train(config, sess):
             n_sents += batch_size
             n_words += int(numpy.sum(y_mask_in))
             progress.uidx += 1
-
-            # make sure validation is under fixed max translation length
-            config.translation_maxlen = init_translation_maxlen
 
             # Update the smoothed version of the model variables.
             # To reduce the performance overhead, we only do this once every
@@ -214,24 +250,31 @@ def train(config, sess):
                 n_words = 0
 
             if config.sample_freq and progress.uidx % config.sample_freq == 0:
-                x_small, x_mask_small, y_small = x_in[:, :, :10], x_mask_in[:, :10], y_in[:, :10]
-                samples = model_set.sample(sess, x_small, x_mask_small)
-                assert len(samples) == len(x_small.T) == len(y_small.T), (len(samples), x_small.shape, y_small.shape)
+                x_small = x_in[:, :, :10]
+                x_mask_small = x_mask_in[:, :10]
+                y_small = y_in[:, :10]
+                samples = translate_utils.translate_batch(
+                    sess, random_sampler, x_small, x_mask_small,
+                    config.translation_maxlen, 0.0)
+                assert len(samples) == len(x_small.T) == len(y_small.T), \
+                    (len(samples), x_small.shape, y_small.shape)
                 for xx, yy, ss in zip(x_small.T, y_small.T, samples):
                     source = util.factoredseq2words(xx, num_to_source)
                     target = util.seq2words(yy, num_to_target)
-                    sample = util.seq2words(ss, num_to_target)
+                    sample = util.seq2words(ss[0][0], num_to_target)
                     logging.info('SOURCE: {}'.format(source))
                     logging.info('TARGET: {}'.format(target))
                     logging.info('SAMPLE: {}'.format(sample))
 
             if config.beam_freq and progress.uidx % config.beam_freq == 0:
-                x_small, x_mask_small, y_small = x_in[:, :, :10], x_mask_in[:, :10], y_in[:,:10]
-                samples = model_set.beam_search(sess, x_small, x_mask_small,
-                                               config.beam_size,
-                                               normalization_alpha=config.normalization_alpha)
-                # samples is a list with shape batch x beam x len
-                assert len(samples) == len(x_small.T) == len(y_small.T), (len(samples), x_small.shape, y_small.shape)
+                x_small = x_in[:, :, :10]
+                x_mask_small = x_mask_in[:, :10]
+                y_small = y_in[:,:10]
+                samples = translate_utils.translate_batch(
+                    sess, beam_search_sampler, x_small, x_mask_small,
+                    config.translation_maxlen, config.normalization_alpha)
+                assert len(samples) == len(x_small.T) == len(y_small.T), \
+                    (len(samples), x_small.shape, y_small.shape)
                 for xx, yy, ss in zip(x_small.T, y_small.T, samples):
                     source = util.factoredseq2words(xx, num_to_source)
                     target = util.seq2words(yy, num_to_target)
@@ -269,10 +312,10 @@ def train(config, sess):
                 if config.valid_script is not None:
                     if config.exponential_smoothing > 0.0:
                         sess.run(fetches=smoothing.swap_ops)
-                        score = validate_with_script(sess, replicas[0], config)
+                        score = validate_with_script(sess, beam_search_sampler)
                         sess.run(fetches=smoothing.swap_ops)
                     else:
-                        score = validate_with_script(sess, replicas[0], config)
+                        score = validate_with_script(sess, beam_search_sampler)
                     need_to_save = (score is not None and
                         (len(progress.valid_script_scores) == 0 or
                          score > max(progress.valid_script_scores)))
@@ -357,19 +400,22 @@ def validate(session, model, config, text_iterator):
     return avg_ce
 
 
-def validate_with_script(session, model, config):
+def validate_with_script(session, beam_search_sampler):
+    config = beam_search_sampler.configs[0]
     if config.valid_script == None:
         return None
     logging.info('Starting external validation.')
     out = tempfile.NamedTemporaryFile(mode='w')
-    inference.translate_file(input_file=open(config.valid_bleu_source_dataset, encoding="UTF-8"),
-                             output_file=out,
-                             session=session,
-                             models=[model],
-                             configs=[config],
-                             beam_size=config.beam_size,
-                             minibatch_size=config.valid_batch_size,
-                             normalization_alpha=config.normalization_alpha)
+    translate_utils.translate_file(
+        input_file=open(config.valid_bleu_source_dataset, encoding="UTF-8"),
+        output_file=out,
+        session=session,
+        sampler=beam_search_sampler,
+        config=config,
+        max_translation_len=config.translation_maxlen,
+        normalization_alpha=config.normalization_alpha,
+        nbest=False,
+        minibatch_size=config.valid_batch_size)
     out.flush()
     args = [config.valid_script, out.name]
     proc = subprocess.Popen(args, stdin=None, stdout=subprocess.PIPE,

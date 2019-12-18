@@ -1,9 +1,16 @@
 import numpy
+import logging
 
 import gzip
 
-import shuffle
-from util import load_dict
+import subprocess
+
+try:
+    from .util import load_dict
+    from . import shuffle
+except (ModuleNotFoundError, ImportError) as e:
+    from util import load_dict
+    import shuffle
 
 def fopen(filename, mode='r'):
     if filename.endswith('.gz'):
@@ -51,7 +58,16 @@ class TextIterator:
                  use_factor=False,
                  maxibatch_size=20,
                  token_batch_size=0,
-                 keep_data_in_memory=False):
+                 keep_data_in_memory=False,
+                 preprocess_script=None):
+        self.preprocess_script = preprocess_script
+        self.source_orig = source
+        self.target_orig = target
+        if self.preprocess_script:
+            logging.info("Executing external preprocessing script...")
+            proc = subprocess.Popen(self.preprocess_script)
+            proc.wait()
+            logging.info("done")
         if keep_data_in_memory:
             self.source, self.target = FileWrapper(source), FileWrapper(target)
             if shuffle_each_epoch:
@@ -59,9 +75,8 @@ class TextIterator:
                 self.source.shuffle_lines(r)
                 self.target.shuffle_lines(r)
         elif shuffle_each_epoch:
-            self.source_orig = source
-            self.target_orig = target
-            self.source, self.target = shuffle.main([self.source_orig, self.target_orig], temporary=True)
+            self.source, self.target = shuffle.jointly_shuffle_files(
+                [self.source_orig, self.target_orig], temporary=True)
         else:
             self.source = fopen(source, 'r')
             self.target = fopen(target, 'r')
@@ -121,13 +136,24 @@ class TextIterator:
         return self
 
     def reset(self):
+        if self.preprocess_script:
+            logging.info("Executing external preprocessing script...")
+            proc = subprocess.Popen(self.preprocess_script)
+            proc.wait()
+            logging.info("done")
+            if self.keep_data_in_memory:
+                self.source, self.target = FileWrapper(self.source_orig), FileWrapper(self.target_orig)
+            else:
+                self.source = fopen(self.source_orig, 'r')
+                self.target = fopen(self.target_orig, 'r')
         if self.shuffle:
             if self.keep_data_in_memory:
                 r = numpy.random.permutation(len(self.source))
                 self.source.shuffle_lines(r)
                 self.target.shuffle_lines(r)
             else:
-                self.source, self.target = shuffle.main([self.source_orig, self.target_orig], temporary=True)
+                self.source, self.target = shuffle.jointly_shuffle_files(
+                    [self.source_orig, self.target_orig], temporary=True)
         else:
             self.source.seek(0)
             self.target.seek(0)

@@ -3,17 +3,28 @@
 import tensorflow as tf
 import numpy
 
-import model_inputs
-from transformer_layers import \
-    EmbeddingLayer, \
-    MaskedCrossEntropy, \
-    get_shape_list, \
-    get_right_context_mask, \
-    get_positional_signal
-from transformer_blocks import AttentionBlock, FFNBlock
-
-import mrt_utils as mru
-from sampling_utils import SamplingUtils
+try:
+    from . import model_inputs
+    from . import mrt_utils as mru
+    from .sampling_utils import SamplingUtils
+    from . import tf_utils
+    from .transformer_blocks import AttentionBlock, FFNBlock
+    from .transformer_layers import \
+        EmbeddingLayer, \
+        MaskedCrossEntropy, \
+        get_right_context_mask, \
+        get_positional_signal
+except (ModuleNotFoundError, ImportError) as e:
+    import model_inputs
+    import mrt_utils as mru
+    from sampling_utils import SamplingUtils
+    import tf_utils
+    from transformer_blocks import AttentionBlock, FFNBlock
+    from transformer_layers import \
+        EmbeddingLayer, \
+        MaskedCrossEntropy, \
+        get_right_context_mask, \
+        get_positional_signal
 
 INT_DTYPE = tf.int32
 FLOAT_DTYPE = tf.float32
@@ -81,10 +92,7 @@ class Transformer(object):
             if self.config.loss_function == 'MRT':
                 # self._loss_per_sentence is negative log probability of the output sentence, each element represents
                 # the loss of each sample pair.
-                if self.config.sample_way == 'beam_search':
-                    self._risk = mru.mrt_cost(self._loss_per_sentence, self.scores, self.config)
-                else:
-                    self._risk = mru.mrt_cost_random(self._loss_per_sentence, self.scores, self.index, self.config)
+                self._risk = mru.mrt_cost(self._loss_per_sentence, self.scores, self.index, self.config)
 
             self.sampling_utils = SamplingUtils(config)
 
@@ -234,7 +242,7 @@ class TransformerEncoder(object):
             # Embed
             source_embeddings = self._embed(source_ids)
             # Obtain length and depth of the input tensors
-            _, time_steps, depth = get_shape_list(source_embeddings)
+            _, time_steps, depth = tf_utils.get_shape_list(source_embeddings)
             # Transform input mask into attention mask
             inverse_mask = tf.cast(tf.equal(source_mask, 0.0), dtype=FLOAT_DTYPE)
             attn_mask = inverse_mask * -1e9
@@ -296,15 +304,6 @@ class TransformerDecoder(object):
         """ Embeds target-side indices to obtain the corresponding dense tensor representations. """
         return self.embedding_layer.embed(index_sequence)
 
-    def _get_initial_memories(self, batch_size, beam_size):
-        """ Initializes decoder memories used for accelerated inference. """
-        initial_memories = dict()
-        for layer_id in range(1, self.config.transformer_dec_depth + 1):
-            initial_memories['layer_{:d}'.format(layer_id)] = \
-                {'keys': tf.tile(tf.zeros([batch_size, 0, self.config.state_size]), [beam_size, 1, 1]),
-                 'values': tf.tile(tf.zeros([batch_size, 0, self.config.state_size]), [beam_size, 1, 1])}
-        return initial_memories
-
     def _build_graph(self):
         """ Defines the model graph. """
         # Initialize layers
@@ -345,11 +344,8 @@ class TransformerDecoder(object):
 
         def _decode_all(target_embeddings):
             """ Decodes the encoder-generated representations into target-side logits in parallel. """
-            # Apply input dropout
-            dec_input = \
-                tf.layers.dropout(target_embeddings, rate=self.config.transformer_dropout_embeddings, training=self.training)
             # Propagate inputs through the encoder stack
-            dec_output = dec_input
+            dec_output = target_embeddings
             for layer_id in range(1, self.config.transformer_dec_depth + 1):
                 dec_output, _ = self.decoder_stack[layer_id]['self_attn'].forward(dec_output, None, self_attn_mask)
                 dec_output, _ = \

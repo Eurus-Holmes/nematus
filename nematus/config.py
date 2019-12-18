@@ -5,8 +5,10 @@ import logging
 import pickle
 import sys
 
-import util
-
+try:
+    from . import util
+except (ModuleNotFoundError, ImportError) as e:
+    import util
 
 class ParameterSpecification:
     """Describes a Nematus configuration parameter.
@@ -239,6 +241,15 @@ class ConfigSpecification:
             type=int, metavar='INT',
             help='Save summaries after INT updates, if 0 do not save '
                  'summaries (default: %(default)s)'))
+
+        group.append(ParameterSpecification(
+            name='preprocess_script', default=None,
+            visible_arg_names=['--preprocess_script'],
+            type=str, metavar='PATH',
+            help='path to script for external preprocessing (default: '
+                 '%(default)s). The script will be called at the start of training, and before each epoch. '
+                 'Useful for dynamic preprocessing, such as BPE dropout. Ideally, this script should write the files '
+                 'given in --source_dataset and --target_dataset, which will be reloaded after calling the script.'))
 
         # Add command-line parameters for 'network' group.
 

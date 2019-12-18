@@ -1,4 +1,4 @@
-FROM nvidia/cuda:9.0-cudnn7-devel
+FROM nvidia/cuda:10.0-cudnn7-devel
 MAINTAINER Tom Kocmi <kocmi@ufal.mff.cuni.cz>
 
 # Install git, wget, python-dev, pip and other dependencies
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip3 install --upgrade pip3
 RUN pip3 install -U setuptools
-RUN pip3 install tensorflow-gpu
+RUN pip3 install tensorflow-gpu==1.15
 
 # Set CUDA_ROOT
 ENV CUDA_ROOT /usr/local/cuda/bin
